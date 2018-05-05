@@ -43,10 +43,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	Uri uri = new Uri.Builder().authority("edu.buffalo.cse.cse486586.simpledynamo.provider").scheme("content").build();
 
-	Object object = new Object();
+	Object object  = new Object();
+	Object object1 = new Object();
 
-	boolean insertionInProgress = false;
-	boolean globalDumpComplete  = false;
+	boolean insertionInProgress          = false;
+	boolean globalDumpComplete           = false;
+	boolean fetchMissingValuesInProgress = false;
 
 	Map<String, String> queryResponse = new HashMap<String, String>();
 
@@ -78,6 +80,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			String target_port = getTargetInsertPort(selection);
 			String successor2 = getNextPort(getNextPort(target_port));
 			if (!myPort.equals(successor2)){
+				// delete the key in the immediate successor
 				new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,"deleteFile", myPort, getNextPort(myPort), selection);
 			}
 		}
@@ -86,7 +89,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	@Override
 	public String getType(Uri uri) {
-		// TODO Auto-generated method stub
 		return null;
 	}
 
@@ -134,19 +136,16 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		String filename = values.getAsString(KEY_FIELD);
 		String content =  values.getAsString(VALUE_FIELD) + "\n";
-
 		String targetPort = getTargetInsertPort(filename);
-
 
 		try {
 			if (targetPort.equals(myPort)){ // save the key in the current avd
 				FileOutputStream outputStream = getContext().openFileOutput(filename, Context.MODE_PRIVATE);
 				outputStream.write(content.getBytes());
 				outputStream.close();
-
+				// move onto successor
 				targetPort = getNextPort(targetPort);
 			}
-
 
 			insertionInProgress = true;
 			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "forwardInsert", myPort, targetPort, filename, content);
@@ -173,9 +172,29 @@ public class SimpleDynamoProvider extends ContentProvider {
 		try {
 			ServerSocket serverSocket = new ServerSocket(SERVER_PORT);
 			new ServerTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, serverSocket);
+
+			// clean the local files and fetch from prev and next avds
+			delete(uri, "@", null);
+
+			// Fetch lists from predecessors and successors
+			String prev1_port = getPrevPort(myPort);
+			String prev2_port = getPrevPort(prev1_port);
+			String next_port  = getNextPort(myPort);
+
+			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "getLocalDump", myPort, prev1_port);
+			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "getLocalDump", myPort, prev2_port);
+			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "getLocalDump", myPort, next_port);
+
+			synchronized (object1){
+				while (fetchMissingValuesInProgress){
+					object1.wait();
+				}
+			}
 		} catch (IOException e) {
 			Log.e(TAG, "Unable to create a ServerSocket");
 			return false;
+		} catch (InterruptedException f){
+			Log.e(TAG, "onCreate: Synchronize interrupted");
 		}
 
 		return false;
@@ -264,8 +283,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 				new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,"queryResponse", myPort, msg_split[1], selection, content);
 			}
 			else {
-				// Forward the query
-//				new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "forwardQuery", msg_split[1], getPrevPort(myPort), selection);
+				Log.d(TAG, "handleForwardQuery: Query not found. ");
 			}
 		}
 		catch (Exception e) {
@@ -347,6 +365,67 @@ public class SimpleDynamoProvider extends ContentProvider {
 		return null;
 	}
 
+	public Void handleGetLocalDump(String msgReceived){
+
+		String msg_split[] = msgReceived.split("###");
+		String listOfFiles[] = getContext().fileList();
+
+		if (listOfFiles.length == 0){
+			return null;
+		}
+
+		try {
+			String keyValuePairs = "";
+			FileInputStream fileInputStream;
+			BufferedReader bufferedReader;
+			String content;
+
+			for (String S : listOfFiles){
+				fileInputStream = getContext().openFileInput(S);
+				bufferedReader = new BufferedReader(new InputStreamReader(fileInputStream));
+				content = bufferedReader.readLine();
+				keyValuePairs = keyValuePairs + S + "<<<" + content + ">>>";
+			}
+
+			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "getLocalDumpResponse", myPort, msg_split[1], keyValuePairs);
+		}
+		catch (Exception e) {
+			Log.e(TAG, "Get local dump failed ");
+		}
+
+		return null;
+	}
+
+	public Void handleGetLocalDumpResponse(String msgReceived){
+		String msg_split[] = msgReceived.split("###");
+		String keyValuePairs[] = msg_split[2].split(">>>");
+
+		for (String keyValue : keyValuePairs){
+			if (keyValue.equals(null) || keyValue.trim().equals("")){
+				continue;
+			}
+			String key = keyValue.split("<<<")[0];
+			String value = keyValue.split("<<<")[1];
+
+			String target_port = getTargetInsertPort(key);
+			String successor1 = getNextPort(target_port);
+			String successor2 = getNextPort(successor1);
+
+			if (myPort.equals(target_port) || myPort.equals(successor1) || myPort.equals(successor2)){
+				try {
+					FileOutputStream outputStream = getContext().openFileOutput(key, Context.MODE_PRIVATE);
+					outputStream.write(value.getBytes());
+					outputStream.close();
+				}
+				catch (Exception e) {
+					Log.e(TAG, "File write failed: " + msg_split[2]);
+				}
+			}
+		}
+
+		return null;
+	}
+
 	private class ServerTask extends AsyncTask<ServerSocket, String, Void> {
 		@Override
 		protected Void doInBackground(ServerSocket... sockets) {
@@ -416,6 +495,19 @@ public class SimpleDynamoProvider extends ContentProvider {
 			}
 			else if (msg_split[0].equals("globalDelete")){
 				handleGlobalDelete(msgReceived);
+			}
+			else if (msg_split[0].equals("getLocalDump")){
+				handleGetLocalDump(msgReceived);
+			}
+			else if (msg_split[0].equals("getLocalDumpResponse")){
+				handleGetLocalDumpResponse(msgReceived);
+			}
+			else if (msg_split[0].equals("globalQueryComplete")){
+				globalDumpComplete = true;
+				synchronized (queryResponse)
+				{
+					queryResponse.notifyAll();
+				}
 			}
 
 			return;
@@ -539,7 +631,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					msgToSend += "###";
 				}
 			}
-			
+
 			try {
 				REMOTE_PORT = msgs[2];
 				Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
@@ -568,7 +660,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 			}
 			catch (IOException e) {
 				handleIOException(msgToSend, REMOTE_PORT);
-				Log.e(TAG, "ClientTask socket IOException");
+				Log.e(TAG, "ClientTask socket IOException: " + msgToSend);
+				e.printStackTrace();
 			}
 
 			return null;
@@ -579,6 +672,18 @@ public class SimpleDynamoProvider extends ContentProvider {
 			if (msg_split[0].equals("forwardInsert")){
 				String insertArgs[] = {remote_port};
 				handleForwardInsert(msgToSend, insertArgs);
+			}
+			else if (msg_split[0].equals("forwardQuery")){
+				new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, msg_split[0], msg_split[1], getPrevPort(remote_port), msg_split[2]);
+			}
+			else if (msg_split[0].equals("globalQuery")){
+				String nextPort = getNextPort(remote_port);
+				if (msg_split[1].equals(nextPort)){
+					new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "globalQueryComplete", myPort, msg_split[1]);
+				}
+				else {
+					new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, msg_split[0], msg_split[1], nextPort);
+				}
 			}
 		}
 	}
