@@ -44,11 +44,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 	Uri uri = new Uri.Builder().authority("edu.buffalo.cse.cse486586.simpledynamo.provider").scheme("content").build();
 
 	Object object  = new Object();
-	Object object1 = new Object();
 
-	boolean insertionInProgress          = false;
-	boolean globalDumpComplete           = false;
-	boolean fetchMissingValuesInProgress = false;
+	boolean insertionInProgress = false;
+	boolean globalDumpComplete  = false;
 
 	Map<String, String> queryResponse = new HashMap<String, String>();
 
@@ -185,16 +183,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "getLocalDump", myPort, prev2_port);
 			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "getLocalDump", myPort, next_port);
 
-			synchronized (object1){
-				while (fetchMissingValuesInProgress){
-					object1.wait();
-				}
-			}
 		} catch (IOException e) {
 			Log.e(TAG, "Unable to create a ServerSocket");
 			return false;
-		} catch (InterruptedException f){
-			Log.e(TAG, "onCreate: Synchronize interrupted");
 		}
 
 		return false;
@@ -422,7 +413,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 				}
 			}
 		}
-
 		return null;
 	}
 
