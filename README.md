@@ -4,4 +4,4 @@
 * Implement data partitioning
 * Handle node failures while continuing to provide availability and linearizability
 
-[Problem Statement](https://github.com/jazzlikethat/SimpleDynamo/blob/master/simeple-dynamo.pdf)
+[Problem Statement](https://github.com/jazzlikethat/SimpleDynamo/blob/master/simple-dynamo.pdf)
